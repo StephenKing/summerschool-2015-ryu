@@ -42,15 +42,12 @@ from ryu.topology import event
 from ryu.topology.api import get_switch, get_link
 import networkx as nx
 
-class MultipathForwarding(app_manager.RyuApp):
+class learningswitch(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
-        super(MultipathForwarding, self).__init__(*args, **kwargs)
-        self.arp_table = {}
-        self.sw = {}
-        self.topology_api_app = self
-        self.net = nx.DiGraph()
+        super(learningswitch, self).__init__(*args, **kwargs)
+        self.mac_to_port = {}
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -132,11 +129,7 @@ class MultipathForwarding(app_manager.RyuApp):
 
         # DPID is just like the number of the switch
         dpid = datapath.id
-        # </editor-fold>
-
-        # <editor-fold desc="Drop LLDP">
-        if pkt.get_protocol(lldp.lldp):
-            return None
+        self.mac_to_port.setdefault(dpid, {})
         # </editor-fold>
 
         # <editor-fold desc="Drop IPv6 Packets">
@@ -152,44 +145,19 @@ class MultipathForwarding(app_manager.RyuApp):
         # </editor-fold>
 
         # <editor-fold desc="Learn sender's MAC address">
-        if src not in self.net:
-            # we received a packet from a MAC address that we've never seen
-            # add this MAC to our network graph
-            self.net.add_node(src)
-            # remember to which port of the switch (dpid) this MAC is attached
-            self.net.add_edge(dpid, src, {'port': in_port})
-            self.net.add_edge(src, dpid)
-            self.net_updated()
+        self.mac_to_port[dpid][src] = in_port
         # </editor-fold>
 
-        # <editor-fold desc="Learn IPs from ARP packets">
-        arp_pkt = pkt.get_protocol(arp.arp)
-        if arp_pkt:
-            self.arp_table[arp_pkt.src_ip] = src
-            self.logger.info("Learned ARP %s<->%s", arp_pkt.src_ip, src)
-        # </editor-fold>
-
-        # <editor-fold desc="Know destination MAC address">
-        if dst in self.net:
-            # compute the shortest path to the destination
-            path = nx.shortest_path(self.net, src, dst)
-            next_switch = path[path.index(dpid)+1]
-            # find the switch port, where the next switch is connected
-            out_port = self.net[dpid][next_switch]['port']
-
-            self.logger.info("Path %s -> %s via %s", src, dst, path)
-            self.logger.info("All paths: %s", list(nx.all_simple_paths(self.net, src, dst)))
+        # <editor-fold desc="Known destination MAC address">
+        if dst in self.mac_to_port[dpid]:
+            out_port = self.mac_to_port[dpid][dst]
         # </editor-fold>
 
         # <editor-fold desc="Unknown destination MAC address">
         else:
-            # the destination is yet unknown, so call ARP handler
-            if self.arp_handler(msg):
-                # when we are here, then the ARP handler responded back and we don't have to care
-                return None
-            else:
-                # we don't know anything, so flood the packet
-                out_port = ofproto.OFPP_FLOOD
+            # we don't know anything, so flood the packet
+            out_port = ofproto.OFPP_FLOOD
+            self.logger.info("sw%s: Flooding", dpid)
         # </editor-fold>
 
         # <editor-fold desc="Action for the packet_out / flow entry">
@@ -198,9 +166,8 @@ class MultipathForwarding(app_manager.RyuApp):
 
         # <editor-fold desc="Install a flow to avoid packet_in next time">
         if out_port != ofproto.OFPP_FLOOD:
-            # generate a pretty precise match
-            match_fields = self.get_match_l4(msg)
-            self.logger.info("Pushing flow rule to sw%s: %s", dpid, match_fields)
+            match_fields = {'in_port': in_port, 'eth_dst': eth.dst}
+            self.logger.info("Pushing flow rule to sw%s: %s -> port %s", dpid, match_fields, out_port)
             match = parser.OFPMatch(**match_fields)
             self.add_flow(datapath, 1, match, actions)
         # </editor-fold>
@@ -214,148 +181,3 @@ class MultipathForwarding(app_manager.RyuApp):
                                   in_port=in_port, actions=actions, data=data)
         datapath.send_msg(out)
         # </editor-fold>
-
-    def arp_handler(self, msg):
-        """
-        Handles ARP messages for us, avoids broadcast storms
-
-        :type msg: ryu.ofproto.ofproto_v1_3_parser.OFPPacketIn
-        :return: True, if the ARP was handeled, False otherwise
-        :rtype: bool
-        """
-        datapath = msg.datapath
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-        in_port = msg.match['in_port']
-
-        pkt = packet.Packet(msg.data)
-        eth = pkt.get_protocols(ethernet.ethernet)[0]
-        arp_pkt = pkt.get_protocol(arp.arp)
-
-        if eth:
-            eth_dst = eth.dst
-            eth_src = eth.src
-
-        # Break the loop for avoiding ARP broadcast storm
-        if eth_dst == mac.BROADCAST_STR and arp_pkt:
-            arp_dst_ip = arp_pkt.dst_ip
-
-            if (datapath.id, eth_src, arp_dst_ip) in self.sw:
-                if self.sw[(datapath.id, eth_src, arp_dst_ip)] != in_port:
-                    datapath.send_packet_out(in_port=in_port, actions=[])
-                    return True
-            else:
-                self.sw[(datapath.id, eth_src, arp_dst_ip)] = in_port
-
-        # Try to reply arp request
-        if arp_pkt:
-            opcode = arp_pkt.opcode
-            arp_src_ip = arp_pkt.src_ip
-            arp_dst_ip = arp_pkt.dst_ip
-
-            if opcode == arp.ARP_REQUEST:
-                if arp_dst_ip in self.arp_table:
-                    actions = [parser.OFPActionOutput(in_port)]
-                    arp_reply = packet.Packet()
-
-                    arp_reply.add_protocol(ethernet.ethernet(
-                        ethertype=eth.ethertype,
-                        dst=eth_src,
-                        src=self.arp_table[arp_dst_ip]))
-                    arp_reply.add_protocol(arp.arp(
-                        opcode=arp.ARP_REPLY,
-                        src_mac=self.arp_table[arp_dst_ip],
-                        src_ip=arp_dst_ip,
-                        dst_mac=eth_src,
-                        dst_ip=arp_src_ip))
-
-                    arp_reply.serialize()
-
-                    out = parser.OFPPacketOut(
-                        datapath=datapath,
-                        buffer_id=ofproto.OFP_NO_BUFFER,
-                        in_port=ofproto.OFPP_CONTROLLER,
-                        actions=actions, data=arp_reply.data)
-                    datapath.send_msg(out)
-                    self.logger.info("Replied to ARP request for %s with %s", arp_dst_ip, self.arp_table[arp_dst_ip])
-                    return True
-        return False
-
-    @set_ev_cls(event.EventSwitchEnter)
-    def update_topology(self, ev):
-        """
-        Watches the topology for updates (new switches/links)
-        :type ev:ryu.topology.event.EventSwitchEnter
-        :return: None
-        :rtype: None
-        """
-        switch_list = get_switch(self.topology_api_app, None)
-        switches = [switch.dp.id for switch in switch_list]
-        self.net.add_nodes_from(switches)
-
-        links_list = get_link(self.topology_api_app, None)
-        links = [(link.src.dpid, link.dst.dpid, {'port': link.src.port_no}) for link in links_list]
-        self.net.add_edges_from(links)
-        links = [(link.dst.dpid, link.src.dpid, {'port': link.dst.port_no}) for link in links_list]
-        self.net.add_edges_from(links)
-
-        self.net_updated()
-
-    def net_updated(self):
-        """
-        Things we want to do, when the topology changes
-        :return: None
-        :rtype: None
-        """
-        self.logger.info("Links: %s", self.net.edges())
-
-    def get_match_l4(self, msg):
-        """
-        Define the match to match packets up to Layer 4 (TCP/UDP ports)
-
-        :param msg: The message to process
-        :type msg: ryu.controller.ofp_event.EventOFPMsgBase
-        :return: Dictionary containing matching fields
-        :rtype: dict
-        """
-        in_port = msg.match['in_port']
-        pkt = packet.Packet(msg.data)
-        eth = pkt.get_protocol(ethernet.ethernet)
-
-        match_fields = dict()
-        match_fields['in_port'] = in_port
-        match_fields['eth_dst'] = eth.dst
-        match_fields['eth_type'] = eth.ethertype
-
-        # we try to parse this as IPv4 packet
-        pkt_ipv4 = pkt.get_protocol(ipv4.ipv4)
-
-        if pkt_ipv4 is None:
-            if eth.ethertype == ether.ETH_TYPE_ARP:
-                self.logger.debug("ARP packet")
-            else:
-                self.logger.debug("Not interested in ethertype %s (hex: %s)", eth.ethertype, hex(eth.ethertype))
-        else:
-            # we have an IPv4 packet
-            self.logger.debug("Got an IPv4 packet")
-            match_fields['ip_proto'] = pkt_ipv4.proto
-            match_fields['ipv4_src'] = pkt_ipv4.src
-            match_fields['ipv4_dst'] = pkt_ipv4.dst
-
-            if pkt_ipv4.proto == inet.IPPROTO_ICMP:
-                self.logger.debug("Got an ICMP packet")
-
-            elif pkt_ipv4.proto == inet.IPPROTO_TCP:
-                self.logger.debug("Got a TCP packet")
-
-                pkt_tcp = pkt.get_protocol(tcp.tcp)
-                match_fields['tcp_dst'] = pkt_tcp.dst_port
-
-            elif pkt_ipv4.proto == inet.IPPROTO_UDP:
-                self.logger.debug("Got a TCP packet")
-
-                pkt_udp = pkt.get_protocol(udp.udp)
-                match_fields['udp_dst'] = pkt_udp.dst_port
-
-        return match_fields
-
