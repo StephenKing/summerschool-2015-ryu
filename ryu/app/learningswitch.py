@@ -144,40 +144,4 @@ class learningswitch(app_manager.RyuApp):
         self.logger.info("sw%s: PACKET_IN %s->%s at port %s - %s", dpid, src, dst, in_port, pkt)
         # </editor-fold>
 
-        # <editor-fold desc="Learn sender's MAC address">
-        self.mac_to_port[dpid][src] = in_port
-        # </editor-fold>
-
-        # <editor-fold desc="Known destination MAC address">
-        if dst in self.mac_to_port[dpid]:
-            out_port = self.mac_to_port[dpid][dst]
-        # </editor-fold>
-
-        # <editor-fold desc="Unknown destination MAC address">
-        else:
-            # we don't know anything, so flood the packet
-            out_port = ofproto.OFPP_FLOOD
-            self.logger.info("sw%s: Flooding", dpid)
-        # </editor-fold>
-
-        # <editor-fold desc="Action for the packet_out / flow entry">
-        actions = [parser.OFPActionOutput(out_port)]
-        # </editor-fold>
-
-        # <editor-fold desc="Install a flow to avoid packet_in next time">
-        if out_port != ofproto.OFPP_FLOOD:
-            match_fields = {'in_port': in_port, 'eth_dst': eth.dst}
-            self.logger.info("Pushing flow rule to sw%s: %s -> port %s", dpid, match_fields, out_port)
-            match = parser.OFPMatch(**match_fields)
-            self.add_flow(datapath, 1, match, actions)
-        # </editor-fold>
-
-        # <editor-fold desc="Send PACKET_OUT">
-        data = None
-        # if the switch has buffered the packet, we don't have to send back the payload
-        if msg.buffer_id == ofproto.OFP_NO_BUFFER:
-            data = msg.data
-        out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
-                                  in_port=in_port, actions=actions, data=data)
-        datapath.send_msg(out)
-        # </editor-fold>
+        # TODO handle the packet!
