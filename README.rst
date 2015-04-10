@@ -1,3 +1,17 @@
+SDN Hands-On Tutorial
+=====================
+
+This tutorial based on the Ryu SDN controller was given at the [COST ACROSS Summer School 2015](http://summerschool2015.informatik.uni-wuerzburg.de) at the [University of Würzburg, Germany](http://www3.informatik.uni-wuerzburg.de).
+
+The tutorial included implementation of two controller apps:
+
+- [ryu.app.learningswitch](https://github.com/StephenKing/summerschool-2015-ryu/blob/summerschool/ryu/app/learningswitch.py): A simple Layer 2 switch implementation.
+- [ryu.app.shortestpath](https://github.com/StephenKing/summerschool-2015-ryu/blob/summerschool/ryu/app/shortestpath.py) a more sophisticated implementation using [networkx](https://networkx.github.io) to compute shortest path also through a topology consisting of loops.
+
+The virtual machine used in the tutorial (based on the work of [SDN Hub](http://sdnhub.org/tutorials/sdn-tutorial-vm/)) can be downloaded [here](http://www3.informatik.uni-wuerzburg.de/staff/steffen.gebert/download/SDN-Hands-On_Summerschool_2015.ova).
+
+The scripts `./run_mininet1.sh` (1 switch for the learning switch scenario)and `./run_mininet4.py` (4 meshed switches for the shortest path scenario) can be used to connect hosts and switches to the controller.
+
 What's Ryu
 ==========
 Ryu is a component-based software defined networking framework.
