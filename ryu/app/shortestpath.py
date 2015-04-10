@@ -134,6 +134,11 @@ class MultipathForwarding(app_manager.RyuApp):
         dpid = datapath.id
         # </editor-fold>
 
+        # <editor-fold desc="Drop LLDP">
+        if pkt.get_protocol(lldp.lldp):
+            return None
+        # </editor-fold>
+
         # <editor-fold desc="Drop IPv6 Packets">
         if pkt.get_protocol(ipv6.ipv6):
             match = parser.OFPMatch(eth_type=eth.ethertype)
@@ -149,30 +154,42 @@ class MultipathForwarding(app_manager.RyuApp):
         # <editor-fold desc="Learn sender's MAC address">
         if src not in self.net:
             # we received a packet from a MAC address that we've never seen
-            # TODO add new learned MAC to our network graph
-
-            # TODO remember to which port of the switch (dpid) this MAC is attached
-
+            # add this MAC to our network graph
+            self.net.add_node(src)
+            # remember to which port of the switch (dpid) this MAC is attached
+            self.net.add_edge(dpid, src, {'port': in_port})
+            self.net.add_edge(src, dpid)
             self.net_updated()
+        # </editor-fold>
+
+        # <editor-fold desc="Learn IPs from ARP packets">
+        arp_pkt = pkt.get_protocol(arp.arp)
+        if arp_pkt:
+            self.arp_table[arp_pkt.src_ip] = src
+            self.logger.info("Learned ARP %s<->%s", arp_pkt.src_ip, src)
         # </editor-fold>
 
         # <editor-fold desc="Know destination MAC address">
         if dst in self.net:
             # compute the shortest path to the destination
-            # TODO path =
-
-            # specify out_port, find the switch port, where the next switch is connected
-            # TODO out_port =
+            path = nx.shortest_path(self.net, src, dst)
+            next_switch = path[path.index(dpid)+1]
+            # find the switch port, where the next switch is connected
+            out_port = self.net[dpid][next_switch]['port']
 
             self.logger.info("Path %s -> %s via %s", src, dst, path)
+            self.logger.info("All paths: %s", list(nx.all_simple_paths(self.net, src, dst)))
         # </editor-fold>
 
         # <editor-fold desc="Unknown destination MAC address">
         else:
-            # TODO flooding is not always good, isn't it?
-
-            # we don't know anything, so flood the packet
-            out_port = ofproto.OFPP_FLOOD
+            # the destination is yet unknown, so call ARP handler
+            if self.arp_handler(msg):
+                # when we are here, then the ARP handler responded back and we don't have to care
+                return None
+            else:
+                # we don't know anything, so flood the packet
+                out_port = ofproto.OFPP_FLOOD
         # </editor-fold>
 
         # <editor-fold desc="Action for the packet_out / flow entry">
@@ -313,15 +330,32 @@ class MultipathForwarding(app_manager.RyuApp):
         # we try to parse this as IPv4 packet
         pkt_ipv4 = pkt.get_protocol(ipv4.ipv4)
 
-        ###############################
-        # TODO continue here to match up to TCP ports
-        ###############################
-        # define matches for particular header fields to specify more fine-grained rules
+        if pkt_ipv4 is None:
+            if eth.ethertype == ether.ETH_TYPE_ARP:
+                self.logger.debug("ARP packet")
+            else:
+                self.logger.debug("Not interested in ethertype %s (hex: %s)", eth.ethertype, hex(eth.ethertype))
+        else:
+            # we have an IPv4 packet
+            self.logger.debug("Got an IPv4 packet")
+            match_fields['ip_proto'] = pkt_ipv4.proto
+            match_fields['ipv4_src'] = pkt_ipv4.src
+            match_fields['ipv4_dst'] = pkt_ipv4.dst
 
-        # match fields defined in type : ryu.ofproto.ofproto_v1_3_parser.OFPMatch
-        # https://github.com/osrg/ryu/blob/72a06f6f60dafd3c246d27477b0c3261ba9c061c/ryu/ofproto/ofproto_v1_3_parser.py#L689-L732
+            if pkt_ipv4.proto == inet.IPPROTO_ICMP:
+                self.logger.debug("Got an ICMP packet")
 
-        # eth/ipv4/tcp/udp etc. classes in ryu.lib.packet
-        # https://github.com/osrg/ryu/tree/72a06f6f60dafd3c246d27477b0c3261ba9c061c/ryu/lib/packet
+            elif pkt_ipv4.proto == inet.IPPROTO_TCP:
+                self.logger.debug("Got a TCP packet")
+
+                pkt_tcp = pkt.get_protocol(tcp.tcp)
+                match_fields['tcp_dst'] = pkt_tcp.dst_port
+
+            elif pkt_ipv4.proto == inet.IPPROTO_UDP:
+                self.logger.debug("Got a TCP packet")
+
+                pkt_udp = pkt.get_protocol(udp.udp)
+                match_fields['udp_dst'] = pkt_udp.dst_port
 
         return match_fields
+
